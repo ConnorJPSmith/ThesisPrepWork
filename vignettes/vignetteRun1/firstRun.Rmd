@@ -1,0 +1,581 @@
+---
+title: "Methylation Vignette - Toy Data"
+author: "Connor Smith"
+output:
+  html_notebook: default
+  html_document: default
+---
+Vignette followed from paper: *A cross-package Bioconductor workflow for analysing methylation array data*  
+  
+#Introduction  
+- Two types of assays  
+    - Infinum I  
+        - 2 bead types: methylated and unmethylated  
+    - Infinum II  
+        - 1 bead
+- Reported as one of two values  
+    - $\beta$-values
+        - $\beta = M/(M+U)$
+        - Small offset of $\alpha$ can be added to denominator to avoid dividing by small numbers
+            - this is the default behavior for *getBeta* function from *minfi*  
+            - default is 100  
+        - preferred for describing methylation levels and visualization  
+    - M-value
+        - $M = log_2(M/U)$
+        - Small offset of $\alpha$ can be added to numerator and denominator to avoid dividing by 0  
+            - this is **not** default behavior for *getM* function from *minfi*  
+        - preferred/required for statistical testing  
+
+#Vignette  
+Setup data variable and verify its contents  
+```{r setup, results='hide'}
+dataDirectory <- system.file("extdata", package = "methylationArrayAnalysis")
+list.files(dataDirectory, recursive = TRUE)
+#output hidden for brevity  
+```  
+
+##Dataset notes  
+- 10 samples  
+    - 4 different sorted T-cell types (naive, rTreg, act_naive, act_rTreg)  
+    - 3 individuals (healthy males, taken from buffy coat)
+        - M28, 29, 30  
+
+- Packages designed for reading Methylation data  
+    - *minfi*
+    - *missMethyl*  
+    - *wateRmelon*  
+    - *methylumi*  
+    - *ChAMP*  
+    - *charm*  
+- *minfi* and *methylumi* allow for reading of raw IDAT files
+    - store in seperate data types  
+    - not trivial to convert between them  
+- *limma* (developed for gene expression microarray analysis) is also popular for analyzing methylation array data  
+    - easily converts to R matrix  
+
+##Load Data  
+```{r load_packages, results='hide', warning=FALSE, message=FALSE}
+library(limma)
+library(minfi)
+library(IlluminaHumanMethylation450kanno.ilmn12.hg19)
+library(IlluminaHumanMethylation450kmanifest)
+library(RColorBrewer)
+library(missMethyl)
+library(matrixStats)
+library(minfiData)
+library(Gviz)
+library(DMRcate)
+library(stringr)
+```
+
+- Methylation specific packages  
+    - *minfi*  
+    - *IlluminaHumanMethylation450kanno.ilmn12.hg19*  
+    - *IlluminaHumanMethylation450kmanifest*  
+    - *missMethyl*
+    - *minfiData*
+    - *DMRcate*
+- Vizualization packages  
+    - *RColorBrewer*  
+    - *Gviz*  
+- Others  
+    - *limma* used to test for differential methylation  
+    - *matrixStats* and *stringr* contribute functions to workflow  
+    - *IlluminaHumanMethylation450kmanifest* provides annotation info for all of the 450k probes  
+
+```{r annotation, cache=TRUE}
+ann450k = getAnnotation(IlluminaHumanMethylation450kanno.ilmn12.hg19) #minfi function  
+#head(ann450k)
+#removed for brevity
+```
+
+###Notes about Bead Array Files  
+- Illumina Methylation data is output as a collection of Intesity Data (IDAT) files
+    - each file is ~8MB  
+- Import using *minfi* function **read.metharray.sheet**  
+    - requires IDAT file and a sample sheet  
+        - sample sheet is a csv with one row for each sample
+    - import creates a data frame whith 1 row for each sample and several columns  
+    - column **BaseName** is created to store the location of IDAT file associated with each sample  
+
+```{r read_in_sample_sheet, cache=TRUE}
+targets <- read.metharray.sheet(dataDirectory, pattern="SampleSheet.csv") #minfi function 
+```
+
+- To read in the raw intensity data, we use **read.metharry.exp** from *minfi*  
+    - creates **RGChannelSet** object with raw intensity for red and green channels for each sample  
+    - good time to rename the samples in resulting object  
+
+```{r read_in_intensities, cache=TRUE}
+# read in intensities  
+rgSet <- read.metharray.exp(targets=targets)
+
+# print object info
+rgSet
+
+#rename samples, using code straight from vignette  
+targets$ID <- paste(targets$Sample_Group, targets$Sample_Name, sep=".")
+sampleNames(rgSet) <- targets$ID
+
+# reprint object info after renaming samples
+rgSet
+```
+
+##Quality Control  
+- Want to screen detection p-values for quality  
+    - low value = good  
+    - high value (> 0.01) = bad  
+- *minfi* function **detectionP** compares total signal $M+U$ for each probe to background signal level  
+    - background signal level estimated from negative control probes  
+- plot mean detection value for each sample to get idea of overall quality  
+
+```{r p_detection_values, cache=TRUE}
+detP <- detectionP(rgSet)
+head(detP)
+```
+**NOTE**: already see very low quality in *birth.11* data, which was included as an example of poor data  
+
+```{r plot_detection_values}
+pal <- brewer.pal(8, "Dark2") # creates a nice looking palette for readable/consistent plotting  
+par(mfrow=c(1,2))
+# plot normal view
+barplot(colMeans(detP),
+        col=pal[factor(targets$Sample_Group)],
+        las=2,
+        cex.names=0.8,
+        ylab="Mean detection p-values")
+abline(h=0.05,
+       col="red")
+legend("topleft",
+       legend=levels(factor(targets$Sample_Group)),
+       fill=pal,
+       bg="white")
+# plot zoomed view
+barplot(colMeans(detP),
+        col=pal[factor(targets$Sample_Group)],
+        las=2,
+        cex.names=0.8,
+        ylim=c(0,0.002),
+        ylab="Mean detection p-values")
+abline(h=0.05,
+       col="red")
+legend("topleft",
+       legend=levels(factor(targets$Sample_Group)),
+       fill=pal,
+       bg="white")
+```
+
+- *minfi* function **qcReport** generates further quality control plots  
+    - run through *minfi* [vignette](http://bioconductor.org/packages/release/bioc/vignettes/minfi/inst/doc/minfi.pdf) for further information on these  
+
+```{r generate_minfi_reports, eval=FALSE}
+qcReport(rgSet, sampNames=targets$ID, sampGroups = targets$Sample_Group, pdf = "qcReport.pdf") # minfi function
+```
+
+- Remove poor quality samples from further analysis (anything with p-value over 0.05)  
+
+```{r remove_high_p_samples}
+# create subset based on means detection p values  
+keep <- colMeans(detP) < 0.05
+
+# remove from samples
+rgSet <- rgSet [,keep]
+# view details to see that birth.11 has been removed 
+rgSet
+
+# remove from targets data
+targets <- targets[keep,]
+# view first couple rows to see that birth.11 has been removed
+targets[,1:5]
+
+# remove from detection p-value table
+dim(detP)
+detP <- detP[,keep]
+dim(detP)
+```
+
+##Normalization  
+- good "rule of thumb" functions within *minfi*  
+    - **preprocessFunnorm** best for datasets with global methylation differences such as cancer/normal or vastly different tissue types  
+    - **preprocessQuantile** best when you do not expect global differences (like using a single tissue)  
+- This vignette uses the **preprocessQuantile** as the cell types being evaluated are all blood cell types and reltively similar  
+- after normalization, data is stored in a **GenomicRatioSet** object
+- Vignette runs the **preprocessQuantile** function with defaults, which are as follows:  
+    - fixOutliers = TRUE $\Rightarrow$ corrects for very low intensities near 0 using the *minfi* function **fixMethOutliers**  
+    - removeBadSamples = FALSE $\Rightarrow$ removes values based on badSampleCutoff for Meth and Unmeth (seperately) for each sample  
+    - badSampleCutoff = 10.5 $\Rightarrow$ default value to use for removeBadSamples  
+    - quantileNormalize = TRUE $\Rightarrow$ specifies to use quantiles
+    - stratified = TRUE $\Rightarrow$ specifies normalize within genomic region strata  
+    - mergeManifest = FALSE $\Rightarrow$ when true, will merge manifest data into output  
+    - sex = NULL $\Rightarrow$ when null uses *minfi* **getSex** function to guess the sex of the sample based on copy number information  
+    - verbose = TRUE $\Rightarrow$ tells the function to include verbose comments in the output  
+
+```{r quantile_normalize}
+# store stratified quantile normalized data into a new GenomicRatioSet object
+mSetSq <- preprocessQuantile(rgSet)
+
+# store raw, preprocessed data for plotting
+mSetRaw <- preprocessRaw(rgSet)
+```
+
+```{r plot_normalized}
+# vizualize effect of normalization
+par(mfrow=c(1,2))
+# raw plot
+densityPlot(rgSet, # i thought that we should use getBeta(mSetRaw), but this results in the same graph but I do not know why
+            sampGroups = targets$Sample_Group,
+            main = "Raw",
+            legend = FALSE)
+legend("top",
+       legend = levels(factor(targets$Sample_Group)),
+       text.col = brewer.pal(8,"Dark2"))
+# normalized plot
+densityPlot(getBeta(mSetSq), 
+            sampGroups = targets$Sample_Group,
+            main = "Normalized",
+            legend = FALSE)
+legend("top",
+       legend = levels(factor(targets$Sample_Group)),
+       text.col = brewer.pal(8,"Dark2"))
+```
+
+##Data Exploration  
+- Principal component analysis is always a good start to understand sources of variation ({shannon voice}: watch for batch effects!)  
+
+```{r pca_1_2}
+par(mfrow=c(1,2))
+# plot pc 1 and 2 labeled by sample group (cell type)
+plotMDS(getM(mSetSq),
+        top=1000,
+        gene.selection = "common", # specifies taking all genes into consideration as opposed to pairwise which focuses on strongest association for this pair
+        col = pal[factor(targets$Sample_Group)]) #limma function
+legend("top",
+       legend = levels(factor(targets$Sample_Group)),
+       text.col = pal,
+       bg = "white",
+       cex = 0.7)
+
+# plot pc 1 and 2 labeled by sample donor
+plotMDS(getM(mSetSq),
+        top=1000,
+        gene.selection = "common", # specifies taking all genes into consideration as opposed to pairwise which focuses on strongest association for this pair
+        col = pal[factor(targets$Sample_Source)]) #limma function
+legend("top",
+       legend = levels(factor(targets$Sample_Source)),
+       text.col = pal,
+       bg = "white",
+       cex = 0.7)
+```
+
+We can see here that the variation is caused by samples being from different individuals. We will look at higher dimensions to find other possible sources of variation.  
+
+```{r pca_1_2_3_4}
+par(mfrow=c(1,3))
+# plot pca between pc 1 and 3
+plotMDS(getM(mSetSq),
+        top = 1000,
+        gene.selection="common", 
+        col = pal[factor(targets$Sample_Group)],
+        dim = c(1,3))
+legend("top", 
+       legend=levels(factor(targets$Sample_Group)), 
+       text.col=pal, 
+       cex=0.7, 
+       bg="white")
+# plot pca between pc 2 and 3
+plotMDS(getM(mSetSq), 
+        top=1000, 
+        gene.selection="common", 
+        col=pal[factor(targets$Sample_Group)], 
+        dim=c(2,3))
+legend("topleft", 
+       legend=levels(factor(targets$Sample_Group)), 
+       text.col=pal,
+       cex=0.7, 
+       bg="white")
+# plot pcs between pc 3 and 4
+plotMDS(getM(mSetSq), 
+        top=1000, 
+        gene.selection="common", 
+        col=pal[factor(targets$Sample_Group)], 
+        dim=c(3,4))
+legend("topright", 
+       legend=levels(factor(targets$Sample_Group)), 
+       text.col=pal,
+       cex=0.7, 
+       bg="white")
+```
+PC3 and PC4 seem to seperate the different cell types well. We will keep these analyses in mind when working downstream.  
+
+##Filtering  
+Remove poorly performing probes before differential methylation analysis to reduce dimensionality and reduce the multiple testing penalty. A cut off detection p-value of 0.01 was used.  
+
+```{r filter_bad_probes}
+# verify that all of the objects are in the correct order
+detP <- detP[match(featureNames(mSetSq),rownames(detP)),]
+
+# identify probes that failed in one or more samples
+keep <- rowSums(detP < 0.01) ==ncol(mSetSq)
+table(keep)
+
+# subset the mSetSq to only include the keepers
+mSetSqFlt <- mSetSq[keep,]
+# print details to see change
+mSetSqFlt
+```
+
+###Notes for use in the future  
+While this one is all male and would not need it, it is common to need to remove probes on X/Y chromosomes when samples are from a mix of male and female. Additionally, you will want to remove probes that exist in locations with known SNPs for the disease you are investigating. Examples of both of these are listed below:
+```{r remove_sex, eval=FALSE}
+# enable this code if your data includes male and female
+# keep <- !(featureNames(mSetSqFlt) %in% ann450k$Name[ann450k$chr %in% c("chrX","chrY")])
+```
+
+Luckily, *minfi* has a built in function to remove probes that contain CpG site SNPs, **dropLociWithSnps**  
+By default, **dropLociWithSnps** has the following settings:
+- snps = c("CpG","SBE") $\Rightarrow$ removes all probes that contain a single-nucleotide polymorphism (SNP) or a single base extension (SBE)  
+- maf = 0 $\Rightarrow$ sets the minor allele frequency, which is a threshold by which to filter probes out. If left at 0, it will remove all probes with any SNPs
+
+
+```{r remove_snp_probes}
+# remove probes with SNPs at CpG site
+mSetSqFlt <- dropLociWithSnps(mSetSqFlt)
+mSetSqFlt
+```
+
+Additionally, we will remove cross-reactive probes (aka multi-mapping probes), as annotated by Chen et al.  
+```{r remove_reactive_probes}
+# assemble list of cross reactive probes
+xReactiveProbes <- read.csv(file = paste(dataDirectory,
+                                         "48639-non-specific-probes-Illumina450k.csv",
+                                         sep="/"),
+                            stringsAsFactors = FALSE)
+
+# identify probes in set that are cross reactive
+keep <- !(featureNames(mSetSqFlt) %in% xReactiveProbes$TargetID)
+table(keep)
+
+mSetSqFlt <- mSetSqFlt[keep,]
+mSetSqFlt
+```
+
+###Revisit MDS Plots  
+After filtering, revisit the MDS plots to look for changes.  
+```{r revisit_mds_1_2}
+par(mfrow=c(1,2))
+# plot pca of 1 and 2 by cell type
+plotMDS(getM(mSetSqFlt), 
+        top=1000, 
+        gene.selection="common", 
+        col=pal[factor(targets$Sample_Group)], 
+        cex=0.8)
+legend("right", 
+       legend=levels(factor(targets$Sample_Group)), 
+       text.col=pal,
+       cex=0.65, 
+       bg="white")
+# plot pca of 1 and 2 by individual
+plotMDS(getM(mSetSqFlt), 
+        top=1000, 
+        gene.selection="common", 
+        col=pal[factor(targets$Sample_Source)])
+legend("right", 
+       legend=levels(factor(targets$Sample_Source)), 
+       text.col=pal,
+       cex=0.7, 
+       bg="white")
+```
+
+We can still see some clustering of PC2 by the individual, but also some seperation of PC1 by cell type.  
+
+```{r revisit_mds_1_2_3_4}
+par(mfrow=c(1,3))
+# pca plot of pc 1 and 3 by individual
+plotMDS(getM(mSetSqFlt), 
+        top=1000, 
+        gene.selection="common", 
+        col=pal[factor(targets$Sample_Source)], 
+        dim=c(1,3))
+legend("right", 
+       legend=levels(factor(targets$Sample_Source)), 
+       text.col=pal,
+       cex=0.7,
+       bg="white")
+# pca plot of pc 2 and 3 by individual
+plotMDS(getM(mSetSqFlt), 
+        top=1000, 
+        gene.selection="common", 
+        col=pal[factor(targets$Sample_Source)], 
+        dim=c(2,3))
+legend("topright", 
+       legend=levels(factor(targets$Sample_Source)), 
+       text.col=pal,
+       cex=0.7, 
+       bg="white")
+# pca plot of pc 3 and 4 by individual
+plotMDS(getM(mSetSqFlt), 
+        top=1000, 
+        gene.selection="common", 
+        col=pal[factor(targets$Sample_Source)], 
+        dim=c(3,4))
+legend("right", 
+       legend=levels(factor(targets$Sample_Source)), 
+       text.col=pal,
+       cex=0.7, 
+       bg="white")
+```
+
+##Calculating M and $\beta$ values  
+M-values $\Rightarrow$ great for statistical analysis  
+$\beta$-values $\Rightarrow$ great for visualization  
+
+```{r m_beta_values}
+# calculate M-values
+mVals <- getM(mSetSqFlt) # minfi function
+head(mVals[,1:5])
+
+bVals <- getBeta(mSetSqFlt)
+head(bVals[,1:5])
+
+# plot m and beta values  
+par(mfrow=c(1,2))
+# plot beta values
+densityPlot(bVals,
+            sampGroups = targets$Sample_Group,
+            main = expression(paste(beta,"-values",sep = "")),
+            legend = FALSE,
+            xlab = expression(paste(beta,"-values",sep = "")))
+legend("top",
+       legend = levels(factor(targets$Sample_Group)),
+       text.col = brewer.pal(8,"Dark2"))
+# plot M values
+densityPlot(mVals,
+            sampGroups = targets$Sample_Group,
+            main = "M-values",
+            legend = FALSE,
+            xlab = "M-values")
+legend("top",
+       legend = levels(factor(targets$Sample_Group)),
+       text.col = brewer.pal(8,"Dark2"))
+```
+
+These plots tell us that there are some differentially methylated regions in the genome of these inidividuals. 
+
+##Pairwise Comparison  
+- Need to adjust for multiple testing  
+    - do this by setting cutoff for FDR of 5%  
+    
+```{r create_design_contrasts_matrix}
+# factor of interest
+cellType <- factor(targets$Sample_Group)
+
+# account for individual effect
+individual <- factor(targets$Sample_Source)
+
+# create a design matrix
+design <- model.matrix(~0+cellType+individual, 
+                       data = targets)
+colnames(design) <- c(levels(cellType),levels(individual)[-1])
+
+# fit linear model
+fit <- lmFit(mVals, design)
+
+# create contrast matrix for specific comparisons
+contMatrix <- makeContrasts(naive-rTreg,
+                           naive-act_naive,
+                           rTreg-act_rTreg,
+                           act_naive-act_rTreg,
+                           levels=design)
+contMatrix
+
+# fit the contrasts
+fit2 <- contrasts.fit(fit,contMatrix)
+fit2 <- eBayes(fit2)
+
+# look at numbers of differentially methylated CpGs at false disco rate < 0.05
+summary(decideTests(fit2)) #default p of 0.05
+```
+
+We want to calculate B-statistic, which is the log-odds of differential methylation.  
+
+##Results from first contrast  
+```{r first_contrast}
+# get table of results for 1st contrast (naive - rTreg)
+ann450kSub <- ann450k[match(rownames(mVals), ann450k$Name),
+                      c(1:4,12:19,24:ncol(ann450k))]
+DMPs <- topTable(fit2,
+                 number = Inf,
+                 coef = 1,
+                 genelist = ann450kSub)
+#head(DMPs)
+write.table(DMPs, file="DMPs.csv", sep=",", row.names=FALSE)
+```
+
+
+Plot some of the pairwise comparisons by group to see if they make sense. We see clustering by cell type at different B statistics. The table is sorted in order by B statistic, so the top 4 will be the most significant results.  
+
+```{r plot_comparisons}
+# plot the top 4 most significantly differentially methylated CpGs 
+par(mfrow=c(2,2))
+sapply(rownames(DMPs)[1:4], function(cpg){
+  plotCpg(bVals, cpg=cpg, pheno=targets$Sample_Group, ylab = "Beta values")
+})
+```
+
+
+##Differential Methylation Analysis of Regions  
+
+
+```{r annotation_add, cache=TRUE}
+myAnnotation <- cpg.annotate(object = mVals, datatype = "array", what = "M", 
+                             analysis.type = "differential", design = design, 
+                             contrasts = TRUE, cont.matrix = contMatrix, 
+                             coef = "naive - rTreg", arraytype = "450K")
+
+
+```
+```{r view_annotation_dmr, cache=TRUE}
+str(myAnnotation)
+
+DMRs <- dmrcate(myAnnotation, lambda=1000, C=2) # lambda 1000 specifies distance between unique clumps of CpG sites
+head(DMRs)
+```
+
+We want to visualize our results. 
+
+```{r viz_dmr}
+# convert the regions to annotated genomic ranges
+data(dmrcatedata)
+results.ranges <- extractRanges(DMRs, genome = "hg19")
+
+# set up the grouping variables and colours
+groups <- pal[1:length(unique(targets$Sample_Group))]
+names(groups) <- levels(factor(targets$Sample_Group))
+cols <- groups[as.character(factor(targets$Sample_Group))]
+samps <- 1:nrow(targets)
+```
+
+
+
+```{r}
+# draw the plot for the top DMR
+par(mfrow=c(1,1))
+DMR.plot(ranges=results.ranges, dmr=1, CpGs=bVals, phen.col=cols, what = "Beta",
+         arraytype = "450K", pch=16, toscale=TRUE, plotmedians=TRUE, 
+         genome="hg19", samps=samps)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

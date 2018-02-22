@@ -1,0 +1,296 @@
+---
+title: "Lumi Vignette - First Run"
+author: "Connor Smith"
+output:
+  html_notebook: default
+  html_document:
+    df_print: paged
+  pdf_document: default
+---
+
+# Lumi Vignette  
+
+```{r verify_lumi}
+## try http:// if https:// URLs are not supported
+# if (!require(lumi)) {
+#   source("https://bioconductor.org/biocLite.R")
+#   biocLite("lumi")
+# }
+library(lumi)
+```
+
+## Pre-processing  
+```{r pre_processing}
+# control treatment data
+data("example.lumiMethy")
+example.lumiMethy
+
+# titration data
+data("example.methyTitration")
+example.methyTitration
+```
+
+Take a look at PCs to look for batch effects in Control/Treat data  
+```{r pca_control_treat}
+plotSampleRelation(example.lumiMethy, 
+                   method = 'mds', 
+                   cv.Th = 0) # covariance threshold
+plotSampleRelation(example.lumiMethy, 
+                   method = 'cluster', 
+                   cv.Th = 0) # covariance threshold
+# print sample names
+sampleNames(example.lumiMethy)
+```
+
+Look at PC's for methyl titration data  
+```{r pca_titration}
+plotSampleRelation(example.methyTitration, 
+                   method = 'mds', 
+                   cv.Th = 0) # covariance threshold
+# print sample names
+sampleNames(example.methyTitration)
+```
+
+## 3.3 Check the data distribution  
+- Use density and boxplot to check the distribution  
+- Density plots of M-values usually have 2 modes, which cannot be properly represented with normal boxplot  
+    - lumi has a special boxplot function to represent this type of data  
+    - <span style="color:red">it seems that *lumi* has modified their boxplot to now be a violin plot?</span>  
+```{r density_boxplot_pre_normalized}
+# plot 4
+density(example.methyTitration, xlab="M-values")
+
+# plot 5 
+sampleColor <- rep(1, ncol(example.lumiMethy))
+sampleColor[grep("Treat", sampleNames(example.lumiMethy))] <- 2
+density(example.lumiMethy, col=sampleColor, xlab="M-value")
+
+# plot 6
+lumi::boxplot(example.lumiMethy)
+```
+
+## 3.4 Check color balance  
+- Two color based system  
+    - Red channel (extended base is T or A)  
+        - occurs when the nucleotide after the C in the CpG site has been converted during bisulfite conversion, indicating that it was not methylated  
+    - Green channel (extended base is C or G)  
+        - indicates that CpG did not convert after bisulfite conversion due to methylated site  
+- Reasons for needing normalization of color balance factors:  
+    - Due to using color based, probe specific variations can be hard to detect  
+    - Color patterns across experiments are unlikely to be consistent  
+    - intensities between can be imbalanced  
+    - effects are non-linear  
+    
+### QUESTIONS  
+1. What determines whether an individual site is methylated? Is it just the ratio between the red and green signals at that probe? If so, how can there exist 'methylated' probes where the red signal is higher than the green?  
+
+```{r plot_densities_of_color_signals}
+# plot comparison of intensity densities for two color channels 
+plotColorBias1D(example.lumiMethy)
+# plot methy sites only  
+plotColorBias1D(example.lumiMethy, channel = 'methy')
+# plot unmethylated only
+plotColorBias1D(example.lumiMethy, channel = 'unmethy')
+# summary of intensities for individual samples  
+colorBiasSummary(example.lumiMethy[,1:8], channel = 'methy')
+# plot boxplopt of intensities of methylated probes
+boxplotColorBias(example.lumiMethy, channel = 'methy')
+# plot boxplot of intensities of unmethylated probes
+boxplotColorBias(example.lumiMethy, channel = 'unmethy')
+```
+
+Plotting on two axes can show the color bias present in samples:  
+```{r color_balance_per_sample}
+sample_count <- length(sampleNames(example.lumiMethy))
+for (i in 1:sample_count) {
+  plotColorBias2D(example.lumiMethy, 
+                  selSample = i,
+                  cex = 2)
+  title(sampleNames(example.lumiMethy)[i])
+}
+```
+
+## 3.5 Quality assessment based on distribution of CpG-site intensity  
+- CpG-site should be fixed (M+U=S), total should not fluctuate greatly  
+    - this means that if M goes up, U should go down  
+    - look for differences in CpG-site intensities across samples in different conditions (batches)  
+
+```{r cpg_site_intensities}
+# boxplot of summed intensities
+boxplotColorBias(example.lumiMethy, channel='sum') #sums the two channels
+# density plot of summed intensities
+plotColorBias1D(example.lumiMethy, channel='sum')
+```
+From these, we can see that the red signal seems to be changing the most between the two sample runs (repeated techniques).  
+We will also plot the estimated intensities.  
+<span style="color:red">I believe this is another one that has been modified since the vignette was created?</span>
+```{r plot_intensity_est}
+# plot desnity plot
+density(estimateIntensity(example.lumiMethy),
+        xlab="(CpG-site Intensity)")
+
+# plot site intensity boxplot
+boxplot(estimateIntensity(example.lumiMethy))
+```
+
+We can see some difference between the two batches which should have be directly replicated. We can use a pairwise pliot to see this even more:  
+```{r pairwise}
+# get color channel
+colorChannel <- as.character(pData(featureData(example.lumiMethy))[, "COLOR_CHANNEL"])
+# replace with consistent naming convention for r colors
+colorChannel[colorChannel == 'Red'] <- 'red'
+colorChannel[colorChannel == 'Grn'] <- 'green'
+# subset the sample for pairwise comparison
+selSample <- c("Ctrl1","Ctrl1.rep","Treat1","Treat1.rep")
+# plot pairwise comparison
+pairs(estimateIntensity(example.lumiMethy[,selSample]),
+      dotColor=colorChannel)
+```
+<span style="color:red"> it seems that estimateIntensity is not returning the log2(intensity) values we would expect. I am assuming this is a change to the code, as I am unable to replicate the graphs in the vignette using the same commands.</span>  
+
+## 3.6 Color Balance Adjustment  
+- We can choose to correct the color balance issues now or later  
+    - vignette recommends now as we may not have the color channel info for analysis later  
+- *lumi* provides a function **lumiMethyC** which is used for color balance adjustment  
+    - two options: "quantile" and "ssn"  
+        - non-equal number of probes means regular quantile will not work  
+        - **lumiMethyC** has a method **smootQuantileNormalization**  
+            - corrects for issue with quantile normalization in sparse density regions  
+            
+Do the correction using lumiMethyC:  
+```{r color_balance_adj}
+lumiMethy.c.adj <- lumiMethyC(example.lumiMethy)
+```
+
+Plot the color balanced plots:  
+```{r color_balance_plots}
+# plot density intensity estimate after correction
+plotColorBias1D(lumiMethy.c.adj, channel = 'sum')
+# plot intensity estimnate boxplot after correction
+boxplotColorBias(lumiMethy.c.adj, channel = 'sum')
+# plot 2d channel comparisons for all samples
+sample_count <- length(sampleNames(lumiMethy.c.adj))
+for (i in 1:sample_count) {
+  plotColorBias2D(lumiMethy.c.adj, 
+                  selSample = i,
+                  cex = 2)
+  title(sampleNames(lumiMethy.c.adj)[i])
+}
+# plot pairwise after color adjust,ment
+pairs(estimateIntensity(lumiMethy.c.adj[,selSample]),
+      dotColor=colorChannel)
+```
+We see a stark change in the disparity between the groups now, with the colors much more inline with what we'd expect  
+
+## 3.7 Background level correction  
+- Illumina includes negative control probes, stored as controlData  
+    - background is estimated as median of these probes  
+    - EXECPT this data is often not exported with the actual data, so we find other ways to estimate background noise to eliminate  
+    - two color channels  
+        - because of the two color channels, background correction should either be done *after* color balancing OR done individually on each color channel, as they will each have their own values  
+- Estimation operates under assumption that many CpG sites are unmethylated, creating a density mode of intensities measured by the methylated probes  
+
+Plot uncorrected background for first five samples:  
+```{r bg_uncorrected}
+# plot background mode of methylated probe data of first five example samples
+plotColorBias1D(example.lumiMethy[,1:5], channel = 'methy', xlim=c(-1000,5000), logMode = FALSE)
+```
+We see a shift between the two colors. We will now correct this using the **lumiMethyB** function, which uses **estimateMethylationBG** for each sample and passes the result to **bgAdjustMethylation** to adjust for the background levels. We will run this two ways, once on the non color-corrected data and once on the color corrected.  
+```{r bg_adjust}
+# adjust bg for seperate channels
+lumiMethy.b.adj <- lumiMethyB(example.lumiMethy,
+                              method = 'bgAdjust2C',
+                              separateColor = TRUE)
+
+# adjust samples that have been color corrected
+lumiMethy.bc.adj <- lumiMethyB(lumiMethy.c.adj, method = 'bgAdjust2C')
+```
+We will not plot the results of these and compare  
+```{r plot_bg_correct}
+# plot bg mode after bg adjustment w/o color adjustment
+plotColorBias1D(lumiMethy.b.adj[,1:5], channel = 'methy', xlim = c(-1000,5000), logMode = FALSE)
+# plot bg mode after bg adjustment w/ color adjustment
+plotColorBias1D(lumiMethy.bc.adj[,1:5], channel = 'methy', xlim = c(-1000,5000), logMode = FALSE)
+```
+
+## 3.8 Data normalization  
+- We cannot use same assumptions in this analysis as other mRNA expression microarrays  
+    - due to highly variable methylation  
+    - Instead, we normalize at the probe level (normalize methylated and unmethylated probes instead of summarized levels)
+- **lumiMethyN** normalizes at probe level  
+    - uses "quantile" and "ssn"  
+    - user can supply own normalization methods so long as data format is consistent with package expectations (import matrix output matrix)  
+    - uses methods from background detection to estimate background and then rescale  
+
+```{r normalization}
+# perform SSN normalization
+lumiMethy.c.ssn <- lumiMethyN(lumiMethy.c.adj, method = 'ssn')
+# perform quantile normalization
+lumiMethy.c.quantile <- lumiMethyN(lumiMethy.c.adj, method = 'quantile')
+```
+
+```{r plot_post_norm}
+# plot relationships after normalization
+plotSampleRelation(lumiMethy.c.ssn, method = 'cluster', cv.Th = 0)
+
+# plot density after ssn
+density(lumiMethy.c.ssn, col = sampleColor, main = "Density plot after SSN normalization")
+
+# plot density after quantile
+density(lumiMethy.c.quantile, col = sampleColor, main = "Density plot after quantile normalization")
+
+# plot density of CpG-site intensity after ssn
+density(estimateIntensity(lumiMethy.c.ssn), col = sampleColor, xlab="CpG Site Intensity")
+
+# plot density of CpG-site intensity after quantile
+density(estimateIntensity(lumiMethy.c.quantile), col = sampleColor, xlab="CpG Site Intensity")
+
+# boxplot of color biasafter quantile normalization
+boxplotColorBias(lumiMethy.c.quantile, channel = 'sum')
+
+# plot pairwise after color adjust,ment - this plot is not done correctly, need to review
+pairs(estimateIntensity(lumiMethy.c.quantile[,selSample]),
+      dotColor=colorChannel,
+      main = "Pair plot of M-value after normalization")
+```
+
+## 3.9 Modeling the methylation status  
+- M-value alone cannot determine methylation status  
+    - developed an algorithm to estimate the methy status by fitting a two component Gamma mixture model  
+```{r fit_model}
+# fit 2 component gamma mix model of first sample
+fittedGammaRaw <- gammaFitEM(exprs(example.lumiMethy)[,1], plotMode = TRUE)
+# added in nromalized data to compare effect of cleaning
+fittedGammaNorm <- gammaFitEM(exprs(lumiMethy.c.quantile)[,1], plotMode = TRUE)
+```
+
+<span style="color:red">Question: why are we fitting to the raw data and not the cleaned data?</span>
+
+Now we get the methylation statuses:  
+```{r methyCall}
+# estimate methy status based on results of gammaFit
+methyCall.raw <-methylationCall(fittedGammaRaw)
+table(methyCall.raw)
+# do it with cleaned data as well 
+methyCall.norm <-methylationCall(fittedGammaNorm)
+table(methyCall.norm)
+```
+
+Also can return exact status/probability for each sample/probe
+```{r status_prob}
+# estimate status on LumiMethyM object on raw
+methyCall.raw.status <- lumiMethyStatus(example.lumiMethy[,1:4])
+head(methyCall.raw.status)
+# estimate status on LumiMethyM object on normalized
+methyCall.norm.status <- lumiMethyStatus(lumiMethy.c.quantile[,1:4])
+head(methyCall.norm.status)
+
+# retrieve probability matrix on raw
+methyCall.raw.prob <- attr(methyCall.raw.status, "probability")
+head(methyCall.raw.prob)
+# retrieve probability matrix on normalized
+methyCall.norm.prob <- attr(methyCall.norm.status, "probability")
+head(methyCall.norm.prob)
+```
+
+I would like to explore this further to see which ones the color correction/normalization affected  
