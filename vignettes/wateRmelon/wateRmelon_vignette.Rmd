@@ -1,0 +1,56 @@
+---
+title: "wateRmelon Vignette"
+author: "Connor Smith"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r install}
+## try http:// if https:// URLs are not supported
+#source("https://bioconductor.org/biocLite.R")
+#biocLite("wateRmelon")
+library(wateRmelon)
+```
+
+# Vignette replication  
+
+## 3 Trying it out  
+Load in the data from the *melon* set  
+```{r load_data}
+# load data
+data(melon)
+# get dimensions
+dim(melon)
+# filter quality based on p values - using default from wateRmelon with a threshold of 0.05
+# also removes sites w/ 5% of samples having beadcount less than 3 (5% is default)
+# also remove sites where 1% of samples have a detection p-value greater than 0.05
+melon.pf <- pfilter(melon)
+```  
+
+Now pre-process using the best method defined by paper, DaSeN:  
+- D: background adjustment performed on Type I and Type II  
+- S: Type I and Type II intensities quantile normalized seperately  
+- N: no dye normalization performed, methylated and umnethylated normalized seperately  
+
+```{r perform_dasen}
+melon.dasen.pf <- dasen(melon.pf)
+```
+
+## 4 Performance Metrics  
+Notes:  
+- all metrics designed so that lower score = better performance  
+
+### 4.1 Genomic Imprinting  
+We expect to see hemimethylation in imprinted regions. The first metric looks at these known regions and creates a "standard-error-like measure of dispersion".  
+
+| melon.pf | melon.dasen.pf |
+|:--------:|:--------------:|
+| `r dmrse_row(melon.pf)` | `r dmrse_row(melon.dasen.pf)` |
+
+
+
+
+
+
+

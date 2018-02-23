@@ -1,0 +1,129 @@
+---
+title: "wateRmelon Vignette"
+author: "Connor Smith"
+output: html_notebook
+---
+
+```{r install,include=FALSE}
+## try http:// if https:// URLs are not supported
+#source("https://bioconductor.org/biocLite.R")
+#biocLite("wateRmelon")
+library(wateRmelon)
+```
+
+# Vignette replication  
+
+## 3 Trying it out  
+Load in the data from the *melon* set  
+```{r load_data}
+# load data
+data(melon)
+# get dimensions
+dim(melon)
+# filter quality based on p values - using default from wateRmelon with a threshold of 0.05
+# also removes sites w/ 5% of samples having beadcount less than 3 (5% is default)
+# also remove sites where 1% of samples have a detection p-value greater than 0.05
+melon.pf <- pfilter(melon)
+```  
+
+Now pre-process using the best method defined by paper, DaSeN:  
+- D: background adjustment performed on Type I and Type II  
+- S: Type I and Type II intensities quantile normalized seperately  
+- N: no dye normalization performed, methylated and umnethylated normalized seperately  
+
+```{r perform_dasen}
+melon.dasen.pf <- dasen(melon.pf)
+```
+
+## 4 Performance Metrics  
+Notes:  
+- all metrics designed so that lower score = better performance  
+
+### 4.1 Genomic Imprinting  
+We expect to see hemimethylation in imprinted regions. The first metric looks at these known regions and creates a "standard-error-like measure of dispersion".  
+
+```{r calculate_idmr_metrics, include=FALSE}
+idmr.melon.pf <- dmrse_row(melon.pf)
+idmr.melon.dasen.pf <- dmrse_row(melon.dasen.pf)
+```
+
+| melon.pf | melon.dasen.pf |
+|:--------:|:--------------:|
+| `r idmr.melon.pf` | `r idmr.melon.dasen.pf` |  
+
+There is a slight decrease in the metric, meaning an increase in performance  
+
+### 4.2 SNP Genotypes  
+65 control probes are present on the 450k which assay highly polymorphic SNPs. These will cluster into three groups, of which ideally there would be no variance within the groups. The resulting metric is a set of three values, which are simplified to a single one during analysis.  
+
+```{r calculate_snp_metrics, include=FALSE}
+snp.melon.pf <- genki(melon.pf)
+snp.melon.dasen.pf <- genki(melon.dasen.pf)
+```
+| genotype | melon.pf | melon.dasen.pf |
+|:--------:|:--------:|:--------------:|
+| A homozygote | `r snp.melon.pf[1]` | `r snp.melon.dasen.pf[1]` |  
+| AB heterozygote | `r snp.melon.pf[2]` | `r snp.melon.dasen.pf[2]` |  
+| B homozygote | `r snp.melon.pf[3]` | `r snp.melon.dasen.pf[3]` |
+
+Once again, we see a slight improvement  
+
+### 4.3 X-chromosome inactivation  
+In females (XX), one X chromosome is inactivated via hypermethylation. This causes the distribution to be focused around 0.5, as opposed to autosomic probes. In females, the methylation at these sites should be above 50% while the males will be drastcially less. This metric will test the predictive power of this estimate based off of the data given. This does require for the sex to be known and (and not all samples belonging to just one sex) as well as chromosome assignments for all probes.  
+
+```{r calculate_sex_metrics, include=FALSE}
+sex.melon.pf <- seabi(melon.pf,
+                      sex = pData(melon.pf)$sex,
+                      X = fData(melon.pf)$CHR=='X')
+sex.melon.dasen.pf <- seabi(melon.dasen.pf,
+                      sex = pData(melon.dasen.pf)$sex,
+                      X = fData(melon.dasen.pf)$CHR=='X')
+```
+
+| melon.pf | melon.dasen.pf |
+|:--------:|:--------------:|
+| `r sex.melon.pf` | `r sex.melon.dasen.pf` |  
+
+Once again, a slight increase in performance.  
+
+# Try it on data from *lumi* vignette  
+We will load the data from the lumi vignette, which gives us a methylumi object (which can be used by wateRmelon)  
+```{r load_lumi_data}
+library(lumi)
+data("example.lumiMethy")
+```
+
+We will want to remove all failed samples before attempting to normalize. This can be done using the **pfilter** function from *wateRmelon*. First, we will visualize the data  
+```{r boxplots_initial}
+# plot methylated
+boxplot(log(methylated(example.lumiMethy)), las=2, cex.axis=0.8)
+title('Boxplot of methylated probes intensities')
+# plot unmethylated
+boxplot(log(unmethylated(example.lumiMethy)), las=2, cex.axis=0.8)
+title('Boxplot of unmethylated probes intensities')
+```
+
+Next, we use **pfilter** to remove failed samples and probes  
+```{r pfilter_lumi}
+example.methyLumiSet <- as(example.lumiMethy, 'MethyLumiSet')
+# pfilter not working on data
+#example.methyLumiSet.pf <- pfilter(example.methyLumiSet)
+```
+
+Converting from a MethyLumiM object to a MethyLumiSet seems to have helped, but there is an issue with the overall process. I am unsure how to deal with this. 
+
+
+We will still try to normalize the data using the DASEN method:  
+```{r dasen_norm}
+example.methyLumiSet.dasen <- dasen(mns=example.methyLumiSet@assayData$methylated,
+                                    uns=example.methyLumiSet@assayData$unmethylated,
+                                    )
+```
+
+
+
+
+
+
+
+
